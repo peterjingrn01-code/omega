@@ -165,10 +165,19 @@
 
     <!-- Email panel -->
     <div class="panel" id="panel-email">
-      <label class="fieldLabel">Email address</label>
-      <input type="email" id="emailInput" placeholder="you@example.com" />
-      <button class="btnAlt" id="btnEmailContinue">Continue with email</button>
-      <div class="smallNote" style="margin-top:10px;">Demo only for now — real email verification is not yet wired up server-side.</div>
+      <div id="emailStep1">
+        <label class="fieldLabel">Email address</label>
+        <input type="email" id="emailInput" placeholder="you@example.com" />
+        <button class="btnAlt" id="btnEmailSendCode">Send verification code</button>
+      </div>
+      <div id="emailStep2" class="hidden">
+        <div class="smallNote">Code sent to <span id="emailStep2Address" class="mono"></span>. Enter the 6-digit code below.</div>
+        <label class="fieldLabel">Verification code</label>
+        <input type="text" id="emailCodeInput" placeholder="123456" maxlength="6" inputmode="numeric" />
+        <button class="btnAlt" id="btnEmailVerifyCode">Verify &amp; connect</button>
+        <button class="btnGhost" id="btnEmailChangeAddress">Use a different email</button>
+      </div>
+      <div id="emailStatus"></div>
     </div>
 
     <div id="loginMsg"></div>
@@ -212,7 +221,7 @@
    - Login: fetch nonce from backend, sign it, POST signature for verification
    ========================================================================= */
 
-  const API_BASE = "https://omegapair-api.peterjingrn01.workers.dev";
+const API_BASE = "https://omegapair-api.peterjingrn01.workers.dev";
 
 // ---- 16 x 16 word list: byte value -> "adjective-noun" ----
 const ADJ = ["amber","violet","ember","cobalt","quiet","stone","gilded","hollow",
@@ -414,17 +423,67 @@ async function performChallengeResponseLogin(keyPair, publicKeyHex) {
   return token;
 }
 
-// ---- email (demo only) ----
-document.getElementById("btnEmailContinue").addEventListener("click", () => {
+// ---- email (real: request code -> verify code) ----
+let pendingEmail = null;
+
+document.getElementById("btnEmailSendCode").addEventListener("click", async () => {
   const val = document.getElementById("emailInput").value.trim();
-  const msg = document.getElementById("loginMsg");
+  const statusEl = document.getElementById("emailStatus");
+  statusEl.innerHTML = "";
   if (!/\S+@\S+\.\S+/.test(val)) {
-    msg.innerHTML = `<div class="errorText">Enter a valid email to continue.</div>`;
+    statusEl.innerHTML = `<div class="errorText">Enter a valid email to continue.</div>`;
     return;
   }
-  session = { publicKeyHex: null, coord: null, token: "local-demo-session",
-              method: "Email (demo)", handleOverride: val.split("@")[0] };
-  enterApp();
+  statusEl.innerHTML = `<div class="okText"><span class="spinner"></span>Sending code…</div>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/email/request-code`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: val }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not send code.");
+    pendingEmail = val;
+    document.getElementById("emailStep2Address").textContent = val;
+    document.getElementById("emailStep1").classList.add("hidden");
+    document.getElementById("emailStep2").classList.remove("hidden");
+    statusEl.innerHTML = "";
+  } catch (e) {
+    statusEl.innerHTML = `<div class="errorText">${e.message}</div>`;
+  }
+});
+
+document.getElementById("btnEmailChangeAddress").addEventListener("click", () => {
+  pendingEmail = null;
+  document.getElementById("emailStep2").classList.add("hidden");
+  document.getElementById("emailStep1").classList.remove("hidden");
+  document.getElementById("emailStatus").innerHTML = "";
+  document.getElementById("emailCodeInput").value = "";
+});
+
+document.getElementById("btnEmailVerifyCode").addEventListener("click", async () => {
+  const code = document.getElementById("emailCodeInput").value.trim();
+  const statusEl = document.getElementById("emailStatus");
+  statusEl.innerHTML = "";
+  if (!/^\d{6}$/.test(code)) {
+    statusEl.innerHTML = `<div class="errorText">Enter the 6-digit code from your email.</div>`;
+    return;
+  }
+  statusEl.innerHTML = `<div class="okText"><span class="spinner"></span>Verifying…</div>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/email/verify-code`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: pendingEmail, code }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Verification failed.");
+    session = { publicKeyHex: null, coord: data.coord, token: data.token,
+                method: "Email", handleOverride: data.handle };
+    enterApp();
+  } catch (e) {
+    statusEl.innerHTML = `<div class="errorText">${e.message}</div>`;
+  }
 });
 
 // ---- app screen ----
@@ -437,7 +496,7 @@ function enterApp() {
     ? `j⟨${session.coord.x}, ${session.coord.y}, ${session.coord.z}⟩`
     : "";
   document.getElementById("composerHint").textContent = "Signed via " + session.method;
-  renderFeed();
+  loadFeed();
 }
 
 document.getElementById("logoutBtn").addEventListener("click", () => {
@@ -450,20 +509,82 @@ document.getElementById("logoutBtn").addEventListener("click", () => {
   document.getElementById("importBox").classList.add("hidden");
   document.getElementById("walletStatus").innerHTML = "";
   document.getElementById("loginMsg").innerHTML = "";
+  document.getElementById("emailStep2").classList.add("hidden");
+  document.getElementById("emailStep1").classList.remove("hidden");
+  document.getElementById("emailStatus").innerHTML = "";
+  document.getElementById("emailCodeInput").value = "";
+  document.getElementById("emailInput").value = "";
+  pendingEmail = null;
 });
 
-document.getElementById("publishBtn").addEventListener("click", () => {
-  const val = document.getElementById("draftInput").value.trim();
-  if (!val) return;
-  const handle = session.handleOverride || (session.publicKeyHex ? session.publicKeyHex.slice(0, 10) : "guest");
-  posts.unshift({ id: "p" + Date.now(), handle, time: "now", text: val, likes: 0, replies: 0 });
-  document.getElementById("draftInput").value = "";
+// ---- posts: persisted via /api/posts ----
+
+function authHeaders() {
+  return session && session.token
+    ? { "Authorization": `Bearer ${session.token}` }
+    : {};
+}
+
+function timeAgo(ms) {
+  const diff = Date.now() - ms;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "now";
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  return `${Math.floor(hr / 24)}d`;
+}
+
+async function loadFeed() {
+  const feedEl = document.getElementById("feed");
+  feedEl.innerHTML = `<div class="smallNote" style="text-align:center;padding:20px 0;"><span class="spinner"></span>Loading feed…</div>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/posts`);
+    if (!res.ok) throw new Error("Feed unavailable.");
+    const data = await res.json();
+    posts = (data.posts || []).map((p) => ({
+      id: p.id, handle: p.handle, text: p.text, likes: p.likes,
+      time: timeAgo(p.created_at), replies: 0,
+    }));
+  } catch (e) {
+    // Fall back to local seed posts if the API isn't reachable yet.
+  }
   renderFeed();
+}
+
+document.getElementById("publishBtn").addEventListener("click", async () => {
+  const val = document.getElementById("draftInput").value.trim();
+  if (!val || !session) return;
+  const btn = document.getElementById("publishBtn");
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/posts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ text: val }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not publish.");
+    posts.unshift({
+      id: data.post.id, handle: data.post.handle, text: data.post.text,
+      likes: data.post.likes, time: "now", replies: 0,
+    });
+    document.getElementById("draftInput").value = "";
+    renderFeed();
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 function renderFeed() {
   const feedEl = document.getElementById("feed");
   feedEl.innerHTML = "";
+  if (posts.length === 0) {
+    feedEl.innerHTML = `<div class="smallNote" style="text-align:center;padding:20px 0;">No posts yet — be the first.</div>`;
+    return;
+  }
   posts.forEach((p) => {
     const card = document.createElement("div");
     card.className = "postCard";
@@ -483,11 +604,23 @@ function renderFeed() {
     feedEl.appendChild(card);
   });
   feedEl.querySelectorAll("[data-like]").forEach((btn) => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", async () => {
       const id = btn.getAttribute("data-like");
-      const post = posts.find((p) => p.id === id);
-      post.likes += 1;
-      renderFeed();
+      if (!session) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch(`${API_BASE}/api/posts/${id}/like`, {
+          method: "POST",
+          headers: authHeaders(),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Could not like post.");
+        const post = posts.find((p) => String(p.id) === String(id));
+        if (post) post.likes = data.likes;
+        renderFeed();
+      } catch (e) {
+        btn.disabled = false;
+      }
     });
   });
 }
