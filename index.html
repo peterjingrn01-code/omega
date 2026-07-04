@@ -196,6 +196,7 @@
         <div class="profileHandle" id="profileHandle"></div>
         <div class="mono postCoordRow" id="profileCoord"></div>
       </div>
+      <button id="friendsBtn" style="background:transparent;border:1px solid var(--line);color:var(--text);border-radius:3px;padding:7px 13px;font-size:12px;margin-right:8px;">Friends</button>
       <button id="logoutBtn">Log out</button>
     </div>
   </header>
@@ -204,12 +205,40 @@
     <div id="composer">
       <textarea id="draftInput" rows="3" placeholder="Post to the graph…"></textarea>
       <div class="composerRow">
-        <span class="composerHint" id="composerHint"></span>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span class="composerHint" id="composerHint"></span>
+          <div id="visibilityToggle" style="display:flex;border:1px solid var(--line);border-radius:3px;overflow:hidden;">
+            <button type="button" class="visBtn active" data-vis="public" style="padding:5px 10px;font-size:11px;background:rgba(94,234,212,0.12);color:var(--accent);border:none;">🌐 Public</button>
+            <button type="button" class="visBtn" data-vis="friends" style="padding:5px 10px;font-size:11px;background:transparent;color:var(--subtext);border:none;">👥 Friends</button>
+          </div>
+        </div>
         <button class="btnPrimary" id="publishBtn" style="width:auto;padding:8px 18px;">Publish</button>
       </div>
     </div>
     <div id="feed"></div>
   </main>
+</div>
+
+<div id="friendsOverlay" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:50;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto;">
+  <div style="background:var(--bg-raised);border:1px solid var(--line);border-radius:4px;max-width:420px;width:100%;padding:22px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <span style="font-weight:600;font-size:15px;">Friends</span>
+      <button id="closeFriendsBtn" style="background:transparent;border:none;color:var(--subtext);font-size:20px;line-height:1;">×</button>
+    </div>
+
+    <label class="fieldLabel">Add a friend by handle</label>
+    <div style="display:flex;gap:8px;margin-bottom:6px;">
+      <input type="text" id="friendSearchInput" placeholder="e.g. wei.jing" style="flex:1;background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:9px 10px;color:var(--text);font-size:13px;" />
+      <button id="sendFriendRequestBtn" class="btnPrimary" style="width:auto;padding:9px 14px;font-size:13px;">Add</button>
+    </div>
+    <div id="friendActionStatus" style="font-size:12px;margin-bottom:16px;"></div>
+
+    <div style="font-size:12px;color:var(--subtext);text-transform:uppercase;letter-spacing:0.06em;margin:18px 0 8px;">Pending requests</div>
+    <div id="friendRequestsList" style="display:flex;flex-direction:column;gap:8px;"></div>
+
+    <div style="font-size:12px;color:var(--subtext);text-transform:uppercase;letter-spacing:0.06em;margin:18px 0 8px;">My friends</div>
+    <div id="friendsListEl" style="display:flex;flex-direction:column;gap:8px;"></div>
+  </div>
 </div>
 
 <script>
@@ -539,18 +568,30 @@ async function loadFeed() {
   const feedEl = document.getElementById("feed");
   feedEl.innerHTML = `<div class="smallNote" style="text-align:center;padding:20px 0;"><span class="spinner"></span>Loading feed…</div>`;
   try {
-    const res = await fetch(`${API_BASE}/api/posts`);
+    const res = await fetch(`${API_BASE}/api/posts`, { headers: authHeaders() });
     if (!res.ok) throw new Error("Feed unavailable.");
     const data = await res.json();
     posts = (data.posts || []).map((p) => ({
       id: p.id, handle: p.handle, text: p.text, likes: p.likes,
-      time: timeAgo(p.created_at), replies: 0,
+      time: timeAgo(p.created_at), replies: 0, visibility: p.visibility || "public",
     }));
   } catch (e) {
     // Fall back to local seed posts if the API isn't reachable yet.
   }
   renderFeed();
 }
+
+let selectedVisibility = "public";
+document.querySelectorAll(".visBtn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    selectedVisibility = btn.getAttribute("data-vis");
+    document.querySelectorAll(".visBtn").forEach((b) => {
+      const active = b === btn;
+      b.style.background = active ? "rgba(94,234,212,0.12)" : "transparent";
+      b.style.color = active ? "var(--accent)" : "var(--subtext)";
+    });
+  });
+});
 
 document.getElementById("publishBtn").addEventListener("click", async () => {
   const val = document.getElementById("draftInput").value.trim();
@@ -561,13 +602,13 @@ document.getElementById("publishBtn").addEventListener("click", async () => {
     const res = await fetch(`${API_BASE}/api/posts`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ text: val }),
+      body: JSON.stringify({ text: val, visibility: selectedVisibility }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Could not publish.");
     posts.unshift({
       id: data.post.id, handle: data.post.handle, text: data.post.text,
-      likes: data.post.likes, time: "now", replies: 0,
+      likes: data.post.likes, time: "now", replies: 0, visibility: data.post.visibility,
     });
     document.getElementById("draftInput").value = "";
     renderFeed();
@@ -591,7 +632,7 @@ function renderFeed() {
     card.innerHTML = `
       <div class="postHead">
         <div>
-          <div class="postHandle">@${p.handle}</div>
+          <div class="postHandle">@${p.handle} ${p.visibility === 'friends' ? '<span style="font-size:10px;color:var(--violet);border:1px solid var(--violet);border-radius:2px;padding:1px 5px;margin-left:6px;">friends</span>' : ''}</div>
           <div class="postCoordRow">${p.time}</div>
         </div>
       </div>
@@ -624,6 +665,103 @@ function renderFeed() {
     });
   });
 }
+
+// ---- friends panel ----
+document.getElementById("friendsBtn").addEventListener("click", () => {
+  document.getElementById("friendsOverlay").classList.remove("hidden");
+  loadFriendsPanel();
+});
+document.getElementById("closeFriendsBtn").addEventListener("click", () => {
+  document.getElementById("friendsOverlay").classList.add("hidden");
+});
+
+async function loadFriendsPanel() {
+  const reqListEl = document.getElementById("friendRequestsList");
+  const friendsListEl = document.getElementById("friendsListEl");
+  reqListEl.innerHTML = `<div class="smallNote">Loading…</div>`;
+  friendsListEl.innerHTML = "";
+
+  try {
+    const [reqRes, friendsRes] = await Promise.all([
+      fetch(`${API_BASE}/api/friends/requests`, { headers: authHeaders() }),
+      fetch(`${API_BASE}/api/friends`, { headers: authHeaders() }),
+    ]);
+    const reqData = await reqRes.json();
+    const friendsData = await friendsRes.json();
+
+    reqListEl.innerHTML = "";
+    if (!reqData.requests || reqData.requests.length === 0) {
+      reqListEl.innerHTML = `<div class="smallNote">No pending requests.</div>`;
+    } else {
+      reqData.requests.forEach((r) => {
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;justify-content:space-between;background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:8px 10px;";
+        row.innerHTML = `
+          <span style="font-size:13px;">@${r.from_handle}</span>
+          <span>
+            <button data-accept="${r.request_id}" style="background:var(--accent);color:#04201C;border:none;border-radius:3px;padding:5px 10px;font-size:11px;margin-right:6px;">Accept</button>
+            <button data-decline="${r.request_id}" style="background:transparent;border:1px solid var(--line);color:var(--subtext);border-radius:3px;padding:5px 10px;font-size:11px;">Decline</button>
+          </span>`;
+        reqListEl.appendChild(row);
+      });
+    }
+
+    friendsListEl.innerHTML = "";
+    if (!friendsData.friends || friendsData.friends.length === 0) {
+      friendsListEl.innerHTML = `<div class="smallNote">No friends yet.</div>`;
+    } else {
+      friendsData.friends.forEach((f) => {
+        const row = document.createElement("div");
+        row.style.cssText = "font-size:13px;background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:8px 10px;";
+        row.textContent = "@" + f.handle;
+        friendsListEl.appendChild(row);
+      });
+    }
+
+    reqListEl.querySelectorAll("[data-accept]").forEach((btn) => {
+      btn.addEventListener("click", () => respondToRequest(btn.getAttribute("data-accept"), "accept"));
+    });
+    reqListEl.querySelectorAll("[data-decline]").forEach((btn) => {
+      btn.addEventListener("click", () => respondToRequest(btn.getAttribute("data-decline"), "decline"));
+    });
+  } catch (e) {
+    reqListEl.innerHTML = `<div class="errorText">Could not load friends.</div>`;
+  }
+}
+
+async function respondToRequest(requestId, action) {
+  try {
+    const res = await fetch(`${API_BASE}/api/friends/respond`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ requestId: Number(requestId), action }),
+    });
+    if (!res.ok) throw new Error("Could not update request.");
+    loadFriendsPanel();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+document.getElementById("sendFriendRequestBtn").addEventListener("click", async () => {
+  const handle = document.getElementById("friendSearchInput").value.trim();
+  const statusEl = document.getElementById("friendActionStatus");
+  statusEl.innerHTML = "";
+  if (!handle) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/friends/request`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ handle }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not send request.");
+    statusEl.innerHTML = `<span style="color:var(--accent);">Request sent to @${handle}.</span>`;
+    document.getElementById("friendSearchInput").value = "";
+  } catch (e) {
+    statusEl.innerHTML = `<span class="errorText">${e.message}</span>`;
+  }
+});
 </script>
 </body>
 </html>
