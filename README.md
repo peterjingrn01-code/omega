@@ -1,38 +1,31 @@
-# ΩPair — Edit Username Update
+# ΩPair — 中/英双语版
 
-This update adds the ability for users to change their display username
-(handle), plus keeps the "remember login" feature from before.
+同一个页面,加了个中英切换按钮,不用维护两份代码。
 
-## What's inside
+## 部署
 
-```
-index.html        ← new frontend, replaces the one on GitHub
-worker-index.js    ← new backend, replaces the code in your Cloudflare Worker
-```
+只需要一步:
 
-No database changes needed this time — the `identities` table already
-has a `handle` column, this just adds a way to update it.
+**GitHub**:把这个 `index.html` 上传替换现有文件(Add file → Upload files → 确认替换 → Commit changes)。
 
-## Deploy in this order
+不需要动 Cloudflare Worker,不需要动数据库。
 
-### 1. Backend (Cloudflare Worker)
+## 怎么用
 
-Workers & Pages → `omegapair-api` → **Edit code** → select all, delete,
-paste in `worker-index.js` → **Deploy**.
+- 登录页右上角、登录后顶部导航栏里,都有一个 **"中文 / EN"** 按钮,点一下就切换语言
+- 选择会记住(存在浏览器本地),下次打开自动是你上次选的语言
+- 如果你从没手动选过,系统会按手机/浏览器的语言设置自动猜一次(中文系统默认显示中文,其他默认英文)
 
-### 2. Frontend (GitHub)
+## 覆盖范围
 
-Rename `index.html` if needed, then on GitHub: **Add file → Upload
-files** → select it → confirm replacing the existing file → **Commit
-changes**.
+- 登录页(钱包登录、邮箱验证码登录)全部文案
+- 顶部导航、发帖框、公开/仅好友切换
+- Wallet 面板(余额、Proof of pair、创世、发送 OPT、历史记录)
+- Friends 面板(搜索加好友、待处理请求、好友列表)
+- 所有操作反馈提示(比如"发送失败""验证码已发送"这类)
 
-## What's new
+## 没有覆盖的部分
 
-- A small ✎ pencil icon next to your username in the top bar. Click it,
-  type a new username (3-20 characters: letters, numbers, dots,
-  underscores, or hyphens), click **Save**.
-- Usernames must be unique — if someone already has it, you'll see an
-  error and can pick another.
-- Changing your username only affects new posts going forward — posts
-  you already made will still show your old username underneath them.
-  This is normal behavior (most social platforms work this way).
+- 后端返回的报错信息(比如用户名重复、余额不足这类,是 Cloudflare Worker 返回的英文文本)——这些还是英文,因为翻译它们需要同时改后端代码。如果想要这部分也中文化,之后可以单独做。
+- 帖子内容本身当然不会被翻译,那是用户自己写的
+- 品牌名(ΩPair、JSL-ian、OPT)在两种语言下都保持不变,这是有意的,不译品牌名
