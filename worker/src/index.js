@@ -196,3 +196,12 @@ async function handleMe(request, env, origin) {
     coord: { x: user.jing_x, y: user.jing_y, z: user.jing_z },
   }, 200, origin);
 }
+export class JofpHub {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+  async fetch(request) {
+    return new Response("JofpHub OK");
+  }
+}
