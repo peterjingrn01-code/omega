@@ -6,6 +6,13 @@ compatibility_date = "2025-06-01"
 binding = "DB"
 database_name = "omegapair-db"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+[[durable_objects.bindings]]
+name = "JOFP_HUB"
+class_name = "JofpHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["JofpHub"]
 
 [vars]
 FRONTEND_ORIGIN = "https://REPLACE-WITH-YOUR-PAGES-DOMAIN.pages.dev"
