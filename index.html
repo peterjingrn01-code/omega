@@ -1142,8 +1142,17 @@ async function loadFriendsPanel() {
         row.style.cssText = "display:flex;align-items:center;justify-content:space-between;font-size:13px;background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:8px 10px;";
         const nameSpan = document.createElement("span");
         nameSpan.textContent = "@" + f.handle;
+        const rowWireId = `${f.kind}:${f.identity_key}`;
+        row.dataset.wire = rowWireId;
+
         const btnGroup = document.createElement("span");
-        btnGroup.style.cssText = "display:flex;gap:6px;flex-shrink:0;";
+        btnGroup.style.cssText = "display:flex;gap:6px;flex-shrink:0;align-items:center;";
+
+        const unreadDot = document.createElement("span");
+        unreadDot.className = "chatUnreadDot";
+        unreadDot.style.cssText = "width:7px;height:7px;border-radius:50%;background:var(--accent);display:" +
+          (chatUnread[rowWireId] ? "inline-block" : "none") + ";";
+        btnGroup.appendChild(unreadDot);
 
         const chatBtn = document.createElement("button");
         chatBtn.textContent = "💬";
@@ -1492,11 +1501,21 @@ async function jofpHandleSignal(msg) {
     if (chatActivePeer && chatActivePeer.wireId === msg.who) chatSetStatus(t("chatOffline"));
     return;
   }
+  if (msg.type === "chat-dial") {
+    // The far end wants a channel but deferred dialling to us.
+    if (msg.from) chatDial(msg.from);
+    return;
+  }
   const fromWireId = msg.from;
   if (!fromWireId) return;
 
   if (msg.type === "offer") {
     const pc = jofpCreatePeerConnection(fromWireId, false);
+    // If we happen to be mid-offer ourselves (a leftover connection, say),
+    // roll our own back so their offer can be accepted cleanly.
+    if (pc.signalingState === "have-local-offer") {
+      try { await pc.setLocalDescription({ type: "rollback" }); } catch (e) {}
+    }
     await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
@@ -1549,6 +1568,10 @@ function jofpSetupDataChannel(peerWireId, dc) {
     const pending = jofpPendingRequests.get(peerWireId);
     if (pending && pending.omegaHash) {
       dc.send(JSON.stringify({ type: "request", omegaHash: pending.omegaHash }));
+    }
+    if (typeof chatActivePeer !== "undefined" && chatActivePeer &&
+        chatActivePeer.wireId === peerWireId) {
+      chatSetStatus(t("chatConnected"));
     }
   });
 
@@ -1796,6 +1819,30 @@ const CHAT_MAX_FILE = 50 * 1024 * 1024;
 let chatActivePeer = null;          // { wireId, handle }
 const chatIncomingFiles = new Map(); // peerWireId -> { meta, chunks, receivedBytes }
 
+// ---- unread markers, so a message that lands while the chat is closed
+//      still shows up on the friends list ----
+let chatUnread = {};
+try { chatUnread = JSON.parse(localStorage.getItem("chat_unread") || "{}"); } catch (e) { chatUnread = {}; }
+
+function chatSaveUnread() {
+  try { localStorage.setItem("chat_unread", JSON.stringify(chatUnread)); } catch (e) {}
+}
+
+function chatMarkUnread(wireId) {
+  chatUnread[wireId] = true;
+  chatSaveUnread();
+  const row = document.querySelector(`[data-wire="${CSS.escape(wireId)}"] .chatUnreadDot`);
+  if (row) row.style.display = "inline-block";
+}
+
+function chatClearUnread(wireId) {
+  if (!chatUnread[wireId]) return;
+  delete chatUnread[wireId];
+  chatSaveUnread();
+  const row = document.querySelector(`[data-wire="${CSS.escape(wireId)}"] .chatUnreadDot`);
+  if (row) row.style.display = "none";
+}
+
 // ---- local conversation storage ----
 let chatDbPromise = null;
 function chatDB() {
@@ -1867,6 +1914,7 @@ async function chatGetAttachment(key) {
 async function openChat(friend) {
   const wireId = `${friend.kind}:${friend.identity_key}`;
   chatActivePeer = { wireId, handle: friend.handle };
+  chatClearUnread(wireId);
 
   document.getElementById("chatPeerName").textContent = "@" + friend.handle;
   document.getElementById("chatInput").placeholder = t("chatPlaceholder");
@@ -1890,16 +1938,36 @@ async function openChat(friend) {
     const dc = jofpDataChannels.get(wireId);
     if (dc && dc.readyState === "open") {
       chatSetStatus(t("chatConnected"));
-    } else {
-      jofpCreatePeerConnection(wireId, true);
-      const pc = jofpPeerConnections.get(wireId);
-      if (pc && !pc.localDescription) {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        jofpSend({ type: "offer", to: wireId, sdp: offer.sdp });
-      }
-      chatWaitForChannel(wireId);
+      return;
     }
+
+    // Both sides may open the chat at once. If both sent an offer the
+    // handshake collides and the channel never opens, so the two ends
+    // agree up front on who dials: the lexicographically smaller wire id.
+    const myWireId = jofpMyWireId();
+    if (myWireId && myWireId < wireId) {
+      chatDial(wireId);
+    } else {
+      // Ask the other end to dial us, then wait for their offer.
+      jofpSend({ type: "chat-dial", to: wireId });
+    }
+    chatWaitForChannel(wireId);
+  } catch (e) {
+    chatSetStatus(t("jofpSignalError"));
+  }
+}
+
+async function chatDial(wireId) {
+  const existing = jofpDataChannels.get(wireId);
+  if (existing && existing.readyState === "open") return;
+
+  const pc = jofpCreatePeerConnection(wireId, true);
+  // Only send an offer if this connection hasn't negotiated yet.
+  if (pc.signalingState !== "stable" || pc.localDescription) return;
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    jofpSend({ type: "offer", to: wireId, sdp: offer.sdp });
   } catch (e) {
     chatSetStatus(t("jofpSignalError"));
   }
@@ -1991,6 +2059,7 @@ async function chatHandleMessage(peerWireId, dc, msg) {
     };
     await chatSaveMessage(record);
     if (chatActivePeer && chatActivePeer.wireId === peerWireId) await chatRender(record);
+    else chatMarkUnread(peerWireId);
     try { dc.send(JSON.stringify({ type: "chat-ack", id: msg.id })); } catch (e) {}
     return;
   }
@@ -2023,6 +2092,7 @@ async function chatHandleMessage(peerWireId, dc, msg) {
     };
     await chatSaveMessage(record);
     if (chatActivePeer && chatActivePeer.wireId === peerWireId) await chatRender(record);
+    else chatMarkUnread(peerWireId);
     try { dc.send(JSON.stringify({ type: "chat-ack", id: incoming.meta.id })); } catch (e) {}
     return;
   }
