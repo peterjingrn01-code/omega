@@ -222,8 +222,15 @@
   <main>
     <div id="composer">
       <textarea id="draftInput" rows="3" placeholder="Post to the graph…" data-i18n-placeholder="placeholderPost"></textarea>
+      <div id="composerMedia" class="hidden" style="display:flex;align-items:center;gap:8px;padding:8px 0;font-size:12px;color:var(--subtext);">
+        <img id="composerMediaThumb" style="width:40px;height:40px;object-fit:cover;border-radius:3px;display:none;" />
+        <span id="composerMediaName" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+        <button type="button" id="composerMediaClear" style="background:transparent;border:none;color:var(--subtext);font-size:16px;cursor:pointer;">×</button>
+      </div>
       <div class="composerRow">
         <div style="display:flex;align-items:center;gap:10px;">
+          <button type="button" id="composerAttachBtn" style="background:transparent;border:1px solid var(--line);color:var(--subtext);border-radius:3px;padding:5px 9px;font-size:13px;cursor:pointer;">📎</button>
+          <input type="file" id="composerFileInput" accept="image/*,*/*" style="display:none;" />
           <span class="composerHint" id="composerHint"></span>
           <div id="visibilityToggle" style="display:flex;border:1px solid var(--line);border-radius:3px;overflow:hidden;">
             <button type="button" class="visBtn active" data-vis="public" data-i18n="visPublic" style="padding:5px 10px;font-size:11px;background:rgba(94,234,212,0.12);color:var(--accent);border:none;">🌐 Public</button>
@@ -466,6 +473,14 @@ const I18N = {
     chatFileTooLarge: "File too large (max 50 MB).",
     chatSendFailed: "Could not send — peer may be offline.",
     chatDownload: "Download",
+    swarmAttach: "Attach image or file",
+    swarmTooLarge: "File too large (max 20 MB for posts).",
+    swarmPreparing: "Preparing…",
+    swarmFetching: "Fetching…",
+    swarmGone: "This attachment has dispersed — nobody online is holding it any more.",
+    swarmTapToLoad: "Tap to load",
+    swarmHolders: "held by ",
+    swarmFailed: "Could not fetch attachment.",
   },
   zh: {
     tagline: "身份即 Jing Space 中的一个坐标点 — 用 ΩPair 登录,或退回邮箱登录。",
@@ -580,6 +595,14 @@ const I18N = {
     chatFileTooLarge: "文件太大了(最大 50 MB)。",
     chatSendFailed: "发送失败 — 对方可能不在线。",
     chatDownload: "下载",
+    swarmAttach: "添加图片或文件",
+    swarmTooLarge: "文件太大了(发帖最大 20 MB)。",
+    swarmPreparing: "正在准备…",
+    swarmFetching: "正在获取…",
+    swarmGone: "这个附件已经消散了 — 在线的人里没有人还持有它。",
+    swarmTapToLoad: "点击加载",
+    swarmHolders: "持有者 ",
+    swarmFailed: "获取附件失败。",
   },
 };
 
@@ -1001,6 +1024,8 @@ async function loadFeed() {
     posts = (data.posts || []).map((p) => ({
       id: p.id, handle: p.handle, text: p.text, likes: p.likes,
       time: timeAgo(p.created_at), replies: 0, visibility: p.visibility || "public",
+      media_hash: p.media_hash, media_name: p.media_name,
+      media_type: p.media_type, media_size: p.media_size,
     }));
   } catch (e) {
     // Fall back to local seed posts if the API isn't reachable yet.
@@ -1022,27 +1047,50 @@ document.querySelectorAll(".visBtn").forEach((btn) => {
 
 document.getElementById("publishBtn").addEventListener("click", async () => {
   const val = document.getElementById("draftInput").value.trim();
-  if (!val || !session) return;
+  if ((!val && !composerMediaFile) || !session) return;
   const btn = document.getElementById("publishBtn");
   btn.disabled = true;
+  const originalLabel = btn.textContent;
   try {
+    // An attachment never reaches the server. We hash it, keep the bytes
+    // here, and tell the hub we're holding them; only the fingerprint
+    // travels with the post.
+    let media = null;
+    if (composerMediaFile) {
+      btn.textContent = t("swarmPreparing");
+      const hash = await swarmHashFile(composerMediaFile);
+      await swarmPut(hash, composerMediaFile, composerMediaFile.name, composerMediaFile.type);
+      media = {
+        hash,
+        name: composerMediaFile.name,
+        mimeType: composerMediaFile.type,
+        size: composerMediaFile.size,
+        chunks: Math.ceil(composerMediaFile.size / SWARM_PIECE_SIZE),
+      };
+      btn.textContent = originalLabel;
+    }
+
     const res = await fetch(`${API_BASE}/api/posts`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ text: val, visibility: selectedVisibility }),
+      body: JSON.stringify({ text: val, visibility: selectedVisibility, media }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || t("couldNotPublish"));
     posts.unshift({
       id: data.post.id, handle: data.post.handle, text: data.post.text,
       likes: data.post.likes, time: "now", replies: 0, visibility: data.post.visibility,
+      media_hash: data.post.media_hash, media_name: data.post.media_name,
+      media_type: data.post.media_type, media_size: data.post.media_size,
     });
     document.getElementById("draftInput").value = "";
+    composerClearMedia();
     renderFeed();
   } catch (e) {
     alert(e.message);
   } finally {
     btn.disabled = false;
+    btn.textContent = originalLabel;
   }
 });
 
@@ -1064,11 +1112,18 @@ function renderFeed() {
         </div>
       </div>
       <div class="postText"></div>
+      <div class="postMedia" style="margin-bottom:12px;"></div>
       <div class="postActions">
         <button class="actionBtn" data-like="${p.id}">♡ ${p.likes}</button>
         <span class="actionBtn">↩ ${p.replies}</span>
       </div>`;
     card.querySelector(".postText").textContent = p.text; // safe text insert
+    const mediaEl = card.querySelector(".postMedia");
+    if (p.media_hash) {
+      swarmRenderAttachment(mediaEl, p);
+    } else {
+      mediaEl.remove();
+    }
     feedEl.appendChild(card);
   });
   feedEl.querySelectorAll("[data-like]").forEach((btn) => {
@@ -1474,7 +1529,12 @@ function jofpConnect() {
   const sock = new WebSocket(wsUrl);
   jofpSocket = sock;
   jofpSocketReadyPromise = new Promise((resolve, reject) => {
-    sock.addEventListener("open", () => resolve(sock));
+    sock.addEventListener("open", () => {
+      resolve(sock);
+      // Re-announce everything this device is holding, so the hub knows
+      // we can serve those attachments to anyone who asks.
+      if (typeof swarmAnnounceAll === "function") swarmAnnounceAll();
+    });
     sock.addEventListener("error", (e) => reject(new Error(t("jofpSignalError"))));
   });
   sock.addEventListener("message", (event) => {
@@ -1499,6 +1559,10 @@ async function jofpHandleSignal(msg) {
     const pending = jofpPendingRequests.get(msg.who);
     if (pending) { pending.reject(new Error(t("jofpPeerOffline"))); jofpPendingRequests.delete(msg.who); }
     if (chatActivePeer && chatActivePeer.wireId === msg.who) chatSetStatus(t("chatOffline"));
+    return;
+  }
+  if (msg.type === "holders") {
+    if (typeof swarmHandleHolders === "function") swarmHandleHolders(msg);
     return;
   }
   if (msg.type === "chat-dial") {
@@ -1581,7 +1645,17 @@ function jofpSetupDataChannel(peerWireId, dc) {
       try { msg = JSON.parse(event.data); } catch (e) { return; }
       await jofpHandleDataChannelMessage(peerWireId, dc, msg);
     } else {
-      // A chat file transfer in flight takes precedence over a share request.
+      // Swarm pieces take priority, then a chat file, then a share request.
+      let routed = false;
+      for (const [hash, pending] of swarmPending) {
+        if (pending.meta && pending.fromWire === peerWireId) {
+          pending.pieces.push(event.data);
+          routed = true;
+          break;
+        }
+      }
+      if (routed) return;
+
       const chatIncoming = chatIncomingFiles.get(peerWireId);
       if (chatIncoming) {
         chatIncoming.chunks.push(event.data);
@@ -1601,6 +1675,12 @@ function jofpSetupDataChannel(peerWireId, dc) {
 }
 
 async function jofpHandleDataChannelMessage(peerWireId, dc, msg) {
+  // ---- swarm piece exchange for public-feed attachments ----
+  if (typeof swarmHandleDataMessage === "function" &&
+      swarmHandleDataMessage(peerWireId, dc, msg)) {
+    return;
+  }
+
   // ---- chat messages ride the same data channel as file transfers ----
   if (msg.type === "chat-text" || msg.type === "chat-file-meta" ||
       msg.type === "chat-file-end" || msg.type === "chat-ack") {
@@ -2202,6 +2282,330 @@ document.getElementById("chatFileInput").addEventListener("change", (e) => {
   if (f) chatSendFile(f);
   e.target.value = "";
 });
+
+
+/* =========================================================================
+   ΩPair — swarm attachments for the public feed
+   -------------------------------------------------------------------------
+   A post's text lives in the database, but an attached image or file does
+   not. It is split into pieces that live only on the devices of people who
+   have actually opened it. To view one, you ask the hub who is holding it
+   right now and pull the pieces straight from those people; once you have
+   it you become a holder too, and pass it on to whoever asks next.
+
+   When the last holder closes their browser, the attachment is gone. The
+   post stays, and simply says the attachment has dispersed. That is the
+   intended behaviour, not a failure: content survives exactly as long as
+   somebody in the network still cares to hold it.
+   ========================================================================= */
+
+const SWARM_PIECE_SIZE = 64 * 1024;
+const SWARM_MAX_FILE = 20 * 1024 * 1024;
+const SWARM_FETCH_TIMEOUT = 25000;
+
+let composerMediaFile = null;   // staged attachment, not yet published
+const swarmPending = new Map(); // hash -> { resolve, reject, pieces, meta, timer }
+const swarmHeld = new Set();    // hashes this device currently holds
+
+// ---- local piece storage ----
+let swarmDbPromise = null;
+function swarmDB() {
+  if (swarmDbPromise) return swarmDbPromise;
+  swarmDbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open("omegapair_swarm", 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("media")) db.createObjectStore("media");
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return swarmDbPromise;
+}
+
+async function swarmPut(hash, blob, name, mimeType) {
+  const db = await swarmDB();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("media", "readwrite");
+    tx.objectStore("media").put({ blob, name, type: mimeType }, hash);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  swarmHeld.add(hash);
+  swarmAnnounce(hash);
+}
+
+async function swarmGet(hash) {
+  const db = await swarmDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("media", "readonly");
+    const req = tx.objectStore("media").get(hash);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function swarmListHeld() {
+  const db = await swarmDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("media", "readonly");
+    const req = tx.objectStore("media").getAllKeys();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ---- telling the hub what we hold ----
+function swarmAnnounce(hash) {
+  jofpSend({ type: "seed", hash });
+}
+
+async function swarmAnnounceAll() {
+  try {
+    const keys = await swarmListHeld();
+    keys.forEach((h) => { swarmHeld.add(h); swarmAnnounce(h); });
+  } catch (e) {}
+}
+
+// ---- hashing ----
+async function swarmHashFile(file) {
+  const buf = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return bytesToHex(new Uint8Array(digest));
+}
+
+// ---- asking the hub who holds a given attachment ----
+const swarmHolderWaiters = new Map(); // hash -> resolve fn
+
+function swarmFindHolders(hash) {
+  return new Promise((resolve) => {
+    swarmHolderWaiters.set(hash, resolve);
+    jofpSend({ type: "find", hash });
+    setTimeout(() => {
+      if (swarmHolderWaiters.has(hash)) {
+        swarmHolderWaiters.delete(hash);
+        resolve([]);
+      }
+    }, 5000);
+  });
+}
+
+function swarmHandleHolders(msg) {
+  const resolve = swarmHolderWaiters.get(msg.hash);
+  if (resolve) {
+    swarmHolderWaiters.delete(msg.hash);
+    resolve(msg.peers || []);
+  }
+}
+
+// ---- serving pieces to whoever asks ----
+async function swarmServeRequest(peerWireId, dc, msg) {
+  const record = await swarmGet(msg.hash);
+  if (!record) {
+    try { dc.send(JSON.stringify({ type: "swarm-miss", hash: msg.hash })); } catch (e) {}
+    return;
+  }
+  const buf = await record.blob.arrayBuffer();
+  const total = Math.ceil(buf.byteLength / SWARM_PIECE_SIZE);
+
+  dc.send(JSON.stringify({
+    type: "swarm-meta", hash: msg.hash, name: record.name,
+    mimeType: record.type, size: buf.byteLength, total,
+  }));
+
+  for (let i = 0; i < total; i++) {
+    if (dc.bufferedAmount > 512 * 1024) {
+      await new Promise((r) => dc.addEventListener("bufferedamountlow", r, { once: true }));
+    }
+    dc.send(buf.slice(i * SWARM_PIECE_SIZE, (i + 1) * SWARM_PIECE_SIZE));
+  }
+  dc.send(JSON.stringify({ type: "swarm-end", hash: msg.hash }));
+}
+
+// ---- receiving pieces ----
+function swarmHandleDataMessage(peerWireId, dc, msg) {
+  if (msg.type === "swarm-want") { swarmServeRequest(peerWireId, dc, msg); return true; }
+
+  if (msg.type === "swarm-meta") {
+    const pending = swarmPending.get(msg.hash);
+    // Several holders may answer at once. Take the first to respond and
+    // ignore the rest, otherwise their pieces would interleave.
+    if (pending && !pending.meta) {
+      pending.meta = msg;
+      pending.pieces = [];
+      pending.fromWire = peerWireId;
+    }
+    return true;
+  }
+
+  if (msg.type === "swarm-end") {
+    const pending = swarmPending.get(msg.hash);
+    if (!pending || !pending.meta) return true;
+    if (pending.fromWire !== peerWireId) return true;
+    swarmAssemble(msg.hash);
+    return true;
+  }
+
+  if (msg.type === "swarm-miss") {
+    const pending = swarmPending.get(msg.hash);
+    if (pending) pending.misses = (pending.misses || 0) + 1;
+    return true;
+  }
+
+  return false;
+}
+
+async function swarmAssemble(hash) {
+  const pending = swarmPending.get(hash);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  swarmPending.delete(hash);
+
+  const blob = new Blob(pending.pieces, {
+    type: pending.meta.mimeType || "application/octet-stream",
+  });
+  // Holding it makes this device a holder in turn.
+  await swarmPut(hash, blob, pending.meta.name, pending.meta.mimeType);
+  pending.resolve({ blob, name: pending.meta.name, type: pending.meta.mimeType });
+}
+
+// ---- pulling an attachment from the swarm ----
+async function swarmFetch(hash) {
+  const local = await swarmGet(hash);
+  if (local) return { blob: local.blob, name: local.name, type: local.type };
+
+  await jofpConnect();
+  const holders = await swarmFindHolders(hash);
+  if (holders.length === 0) throw new Error(t("swarmGone"));
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      swarmPending.delete(hash);
+      reject(new Error(t("swarmGone")));
+    }, SWARM_FETCH_TIMEOUT);
+
+    swarmPending.set(hash, { resolve, reject, pieces: [], meta: null, timer, misses: 0 });
+
+    // Ask every holder; whichever answers first supplies the pieces.
+    holders.forEach((holderWireId) => swarmAsk(holderWireId, hash));
+  });
+}
+
+async function swarmAsk(holderWireId, hash) {
+  try {
+    let dc = jofpDataChannels.get(holderWireId);
+    if (!dc || dc.readyState !== "open") {
+      const myWireId = jofpMyWireId();
+      if (myWireId && myWireId < holderWireId) {
+        chatDial(holderWireId);
+      } else {
+        jofpSend({ type: "chat-dial", to: holderWireId });
+      }
+      // Give the handshake a moment, then send the request.
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 400));
+        dc = jofpDataChannels.get(holderWireId);
+        if (dc && dc.readyState === "open") break;
+      }
+    }
+    if (dc && dc.readyState === "open") {
+      dc.send(JSON.stringify({ type: "swarm-want", hash }));
+    }
+  } catch (e) {}
+}
+
+// ---- composer wiring ----
+document.getElementById("composerAttachBtn").addEventListener("click", () => {
+  document.getElementById("composerFileInput").click();
+});
+
+document.getElementById("composerFileInput").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  if (file.size > SWARM_MAX_FILE) { alert(t("swarmTooLarge")); return; }
+
+  composerMediaFile = file;
+  const wrap = document.getElementById("composerMedia");
+  const thumb = document.getElementById("composerMediaThumb");
+  const nameEl = document.getElementById("composerMediaName");
+
+  nameEl.textContent = file.name;
+  if (file.type.startsWith("image/")) {
+    thumb.src = URL.createObjectURL(file);
+    thumb.style.display = "block";
+  } else {
+    thumb.style.display = "none";
+  }
+  wrap.classList.remove("hidden");
+});
+
+document.getElementById("composerMediaClear").addEventListener("click", () => {
+  composerMediaFile = null;
+  document.getElementById("composerMedia").classList.add("hidden");
+  document.getElementById("composerMediaThumb").src = "";
+});
+
+function composerClearMedia() {
+  composerMediaFile = null;
+  const wrap = document.getElementById("composerMedia");
+  if (wrap) wrap.classList.add("hidden");
+  const thumb = document.getElementById("composerMediaThumb");
+  if (thumb) thumb.src = "";
+}
+
+// ---- rendering an attachment inside a post card ----
+async function swarmRenderAttachment(container, post) {
+  container.innerHTML = "";
+  const isImage = (post.media_type || "").startsWith("image/");
+
+  const local = await swarmGet(post.media_hash);
+  if (local) {
+    swarmShowBlob(container, local.blob, local.name, isImage);
+    return;
+  }
+
+  const btn = document.createElement("button");
+  btn.style.cssText = "background:transparent;border:1px dashed var(--line);color:var(--subtext);" +
+    "border-radius:3px;padding:14px;font-size:12px;cursor:pointer;width:100%;text-align:center;";
+  btn.textContent = (isImage ? "🖼 " : "📄 ") + t("swarmTapToLoad") +
+    (post.media_name ? " — " + post.media_name : "");
+
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = t("swarmFetching");
+    try {
+      const result = await swarmFetch(post.media_hash);
+      swarmShowBlob(container, result.blob, result.name, isImage);
+    } catch (e) {
+      btn.disabled = true;
+      btn.style.cursor = "default";
+      btn.style.opacity = "0.6";
+      btn.textContent = "◌ " + t("swarmGone");
+    }
+  });
+
+  container.appendChild(btn);
+}
+
+function swarmShowBlob(container, blob, name, isImage) {
+  container.innerHTML = "";
+  const url = URL.createObjectURL(blob);
+  if (isImage) {
+    const img = document.createElement("img");
+    img.src = url;
+    img.style.cssText = "max-width:100%;border-radius:3px;display:block;cursor:pointer;";
+    img.addEventListener("click", () => window.open(url, "_blank"));
+    container.appendChild(img);
+  } else {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name || "file";
+    link.textContent = "📄 " + (name || "file");
+    link.style.cssText = "color:var(--accent);text-decoration:underline;font-size:13px;";
+    container.appendChild(link);
+  }
+}
 
 </script>
 </body>
